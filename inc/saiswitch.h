@@ -178,6 +178,25 @@ typedef enum _sai_switch_restart_type_t
 } sai_switch_restart_type_t;
 
 /**
+ *  @brief Attribute data for packet resolution types.
+ */
+typedef enum _sai_packet_resolution_t
+{
+    /** L2 Unicast Packet type */
+    SAI_PACKET_L2_UNICAST,
+
+    /** L2 Broadcast Packet type */
+    SAI_PACKET_L2_BROADCAST,
+
+    /** L2 Multicast Packet type */
+    SAI_PACKET_L2_MULTICAST,
+
+    /** L3 Unicast Packet type */
+    SAI_PACKET_IP_UNICAST,
+
+} sai_packet_resolution_t;
+
+/**
 *  Attribute Id in sai_set_switch_attribute() and
 *  sai_get_switch_attribute() calls
 */
