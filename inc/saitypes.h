@@ -471,13 +471,32 @@ typedef struct _sai_qos_map_list_t
     sai_qos_map_t *list;
 } sai_qos_map_list_t;
 
+typedef struct _sai_port_vlan_t
+{
+    /** Port Id */
+    sai_object_id_t  port_id;
+
+    /** vlan id  */
+    sai_vlan_id_t vlan_id;
+} sai_port_vlan_t;
+
+typedef struct _sai_port_vlan_list_t
+{
+    /** Number of entries in the list */
+    uint32_t count;
+
+    /** Port VLAN list */
+    sai_port_vlan_t *list;
+
+} sai_port_vlan_list_t; 
+
 typedef struct _sai_tunnel_map_params_t
 {
     /** ECN */
     sai_uint8_t ecn;
 
-    /** vlan id  */
-    sai_vlan_id_t vlan_id;
+    /** Port vlan list  */
+    sai_port_vlan_list_t  *port_vlan_list;
 
     /** VNI id  */
     sai_uint32_t vni_id;
