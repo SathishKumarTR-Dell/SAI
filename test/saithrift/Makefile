@@ -1,7 +1,12 @@
 CXX=g++
-SAI_HEADER_DIR = /usr/include/sai
+SAI_PREFIX = /usr
+SAI_HEADER_DIR ?= $(SAI_PREFIX)/include/sai
 SAI_HEADERS = $(SAI_HEADER_DIR)/sai*.h
 CFLAGS = -I$(SAI_HEADER_DIR) -I. -std=c++11
+ifeq ($(DEBUG),1)
+CFLAGS += -O0 -ggdb
+endif
+
 ifeq ($(platform),MLNX)
 CDEFS = -DMLNXSAI
 else
@@ -23,7 +28,9 @@ SAIDIR = ./include
 SRC = ./src
 THRIFT = /usr/bin/thrift
 CTYPESGEN = /usr/local/bin/ctypesgen.py
-LIBS = -lthrift -lpthread
+LIBS = -lthrift -lpthread  -lsai
+SAI_LIBRARY_DIR ?= $(SAI_PREFIX)/lib
+LDFLAGS = -L$(SAI_LIBRARY_DIR) -Wl,-rpath=$(SAI_LIBRARY_DIR)
 CPP_SOURCES = \
 				src/gen-cpp/switch_sai_constants.cpp \
 				src/gen-cpp/switch_sai_constants.h \
@@ -44,6 +51,7 @@ SAI_PY_HEADERS = \
                 src/gen-py/switch_sai/sai_headers.py
 
 MKDIR_P = mkdir -p
+INSTALL := /usr/bin/install
 
 all: directories $(ODIR)/librpcserver.a saiserver clientlib
 
@@ -75,8 +83,17 @@ $(ODIR)/librpcserver.a: $(ODIR)/switch_sai_rpc.o $(ODIR)/switch_sai_types.o $(OD
 	ar rcs $(ODIR)/librpcserver.a $(ODIR)/switch_sai_rpc.o $(ODIR)/switch_sai_types.o $(ODIR)/switch_sai_constants.o $(ODIR)/switch_sai_rpc_server.o
 
 saiserver: $(ODIR)/saiserver.o $(ODIR)/librpcserver.a
-	$(CXX) $(ODIR)/switch_sai_rpc_server.o $(ODIR)/saiserver.o -o $@ \
-		   $(ODIR)/librpcserver.a $(LIBS) -lsai
+	$(CXX) $(LDFLAGS) $(ODIR)/switch_sai_rpc_server.o $(ODIR)/saiserver.o -o $@ \
+		   $(ODIR)/librpcserver.a $(LIBS)
+
+install-lib: $(ODIR)/librpcserver.a 
+	$(INSTALL) -D $(ODIR)/librpcserver.a $(DESTDIR)/usr/lib/librpcserver.a
+	$(INSTALL) -D $(SRC)/switch_sai_rpc_server.h $(DESTDIR)/usr/include/switch_sai_rpc_server.h
+
+install-pylib: $(PY_SOURCES) $(SAI_PY_HEADERS)
+	python setup.py install --prefix $(DESTDIR)/usr/local$(prefix)
+
+install: install-lib install-pylib
 
 clean:
 	rm -rf $(ODIR) $(SRC)/gen-cpp $(SRC)/gen-py saiserver dist

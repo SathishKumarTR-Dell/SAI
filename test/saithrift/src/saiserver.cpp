@@ -5,11 +5,15 @@
 #include <unistd.h>
 #include <sys/queue.h>
 #include <sys/types.h>
-
+#include <fstream>
+#include <sstream>
+#include <set>
+#include <iostream>
 #include <getopt.h>
 #include <assert.h>
 #include <signal.h>
 
+#include <cstring>
 #include <thread>
 
 #include <sys/socket.h>
@@ -30,9 +34,13 @@ extern "C" {
 
 sai_switch_api_t* sai_switch_api;
 
-std::map<std::string, std::string> g_pfmap;
+std::map<std::string, std::string> gProfileMap;
+std::map<std::set<int>, std::string> gPortMap;
 
-void on_switch_state_change(_In_ sai_switch_oper_status_t switch_oper_status)
+sai_object_id_t gSwitchId; ///< SAI switch global object ID.
+
+void on_switch_state_change(_In_ sai_object_id_t switch_id,
+                            _In_ sai_switch_oper_status_t switch_oper_status)//
 {
 }
 
@@ -46,30 +54,17 @@ void on_port_state_change(_In_ uint32_t count,
 {
 }
 
-void on_port_event(_In_ uint32_t count,
-                   _In_ sai_port_event_notification_t *data)
+void on_shutdown_request(_In_ sai_object_id_t switch_id)//
 {
 }
 
-void on_shutdown_request()
-{
-}
-
-void on_packet_event(_In_ const void *buffer,
+void on_packet_event(_In_ sai_object_id_t switch_id,
+                     _In_ const void *buffer,
                      _In_ sai_size_t buffer_size,
                      _In_ uint32_t attr_count,
                      _In_ const sai_attribute_t *attr_list)
 {
 }
-
-sai_switch_notification_t switch_notifications = {
-    on_switch_state_change,
-    on_fdb_event,
-    on_port_state_change,
-    on_port_event,
-    on_shutdown_request,
-    on_packet_event
-};
 
 // Profile services
 /* Get variable value given its name */
@@ -79,15 +74,23 @@ const char* test_profile_get_value(
 {
     UNREFERENCED_PARAMETER(profile_id);
 
-    std::map<std::string, std::string>::const_iterator it = g_pfmap.find(variable);
-    if (it == g_pfmap.end())
+    if (variable == NULL)
     {
+        printf("variable is null\n");
+        return NULL;
+    }
+
+    std::map<std::string, std::string>::const_iterator it = gProfileMap.find(variable);
+    if (it == gProfileMap.end())
+    {
+        printf("%s: NULL\n", variable);
         return NULL;
     }
 
     return it->second.c_str();
 }
 
+std::map<std::string, std::string>::iterator gProfileIter = gProfileMap.begin();
 /* Enumerate all the K/V pairs in a profile.
    Pointer to NULL passed as variable restarts enumeration.
    Function returns 0 if next value exists, -1 at the end of the list. */
@@ -97,13 +100,38 @@ int test_profile_get_next_value(
         _Out_ const char** value)
 {
     UNREFERENCED_PARAMETER(profile_id);
-    UNREFERENCED_PARAMETER(variable);
-    UNREFERENCED_PARAMETER(value);
 
-    return -1;
+    if (value == NULL)
+    {
+        printf("resetting profile map iterator");
+
+        gProfileIter = gProfileMap.begin();
+        return 0;
+    }
+
+    if (variable == NULL)
+    {
+        printf("variable is null");
+        return -1;
+    }
+
+    if (gProfileIter == gProfileMap.end())
+    {
+        printf("iterator reached end");
+        return -1;
+    }
+
+    *variable = gProfileIter->first.c_str();
+    *value = gProfileIter->second.c_str();
+
+    printf("key: %s:%s", *variable, *value);
+
+    gProfileIter++;
+
+    return 0;
 }
 
-const service_method_table_t test_services = {
+const sai_service_method_table_t test_services = {
     test_profile_get_value,
     test_profile_get_next_value
 };
@@ -116,8 +144,9 @@ void sai_diag_shell()
     while (true)
     {
         sai_attribute_t attr;
-        attr.id = SAI_SWITCH_ATTR_CUSTOM_RANGE_BASE + 1;
-        status = sai_switch_api->set_switch_attribute(&attr);
+        attr.id = SAI_SWITCH_ATTR_SWITCH_SHELL_ENABLE;
+        attr.value.booldata = true;
+        status = sai_switch_api->set_switch_attribute(gSwitchId, &attr);
         if (status != SAI_STATUS_SUCCESS)
         {
             return;
@@ -128,25 +157,226 @@ void sai_diag_shell()
 }
 #endif
 
+struct cmdOptions
+{
+    std::string profileMapFile;
+    std::string portMapFile;
+    std::string initScript;
+};
+
+cmdOptions handleCmdLine(int argc, char **argv)
+{
+
+    cmdOptions options = {};
+
+    while(true)
+    {
+        static struct option long_options[] =
+        {
+            { "profile",          required_argument, 0, 'p' },
+            { "portmap",          required_argument, 0, 'f' },
+            { "init-script",      required_argument, 0, 'S' },
+            { 0,                  0,                 0,  0  }
+        };
+
+        int option_index = 0;
+
+        int c = getopt_long(argc, argv, "p:f:S:", long_options, &option_index);
+
+        if (c == -1)
+            break;
+
+        switch (c)
+        {
+            case 'p':
+                printf("profile map file: %s\n", optarg);
+                options.profileMapFile = std::string(optarg);
+                break;
+
+            case 'f':
+                printf("port map file: %s\n", optarg);
+                options.portMapFile = std::string(optarg);
+                break;
+
+            case 'S':
+                printf("init script: %s\n", optarg);
+                options.initScript = std::string(optarg);
+                break;
+
+            default:
+                printf("getopt_long failure\n");
+                exit(EXIT_FAILURE);
+        }
+    }
+
+    return options;
+}
+
+void handleProfileMap(const std::string& profileMapFile)
+{
+
+    if (profileMapFile.size() == 0)
+        return;
+
+    std::ifstream profile(profileMapFile);
+
+    if (!profile.is_open())
+    {
+        printf("failed to open profile map file: %s : %s\n", profileMapFile.c_str(), strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    std::string line;
+
+    while(getline(profile, line))
+    {
+        if (line.size() > 0 && (line[0] == '#' || line[0] == ';'))
+            continue;
+
+        size_t pos = line.find("=");
+
+        if (pos == std::string::npos)
+        {
+            printf("not found '=' in line %s\n", line.c_str());
+            continue;
+        }
+
+        std::string key = line.substr(0, pos);
+        std::string value = line.substr(pos + 1);
+
+        gProfileMap[key] = value;
+
+        printf("insert: %s:%s\n", key.c_str(), value.c_str());
+    }
+}
+
+void handlePortMap(const std::string& portMapFile)
+{
+
+    if (portMapFile.size() == 0)
+        return;
+
+    std::ifstream portmap(portMapFile);
+
+    if (!portmap.is_open())
+    {
+        printf("failed to open port map file: %s : %s\n", portMapFile.c_str(), strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    std::string line;
+
+    while(getline(portmap, line))
+    {
+        if (line.size() > 0 && (line[0] == '#' || line[0] == ';'))
+            continue;
+
+        size_t pos = line.find(" ");
+
+        if (pos == std::string::npos)
+        {
+            printf("not found ' ' in line %s\n", line.c_str());
+            continue;
+        }
+
+        std::string fp_value = line.substr(0, pos);
+        std::string lanes    = line.substr(pos + 1);
+
+        // ::isspace : C-Style white space predicate. Locale independent.
+        lanes.erase(std::remove_if(lanes.begin(), lanes.end(), ::isspace), lanes.end());
+
+        std::istringstream iss(lanes);
+        std::string lane_str;
+        std::set<int> lane_set;
+
+        while (getline(iss, lane_str, ','))
+        {
+            int lane = stoi(lane_str);
+            lane_set.insert(lane);
+        }
+
+        gPortMap.insert(std::pair<std::set<int>,std::string>(lane_set,fp_value));
+    }
+}
+
+void handleInitScript(const std::string& initScript)
+{
+
+    if (initScript.size() == 0)
+        return;
+
+    printf("Running %s ...\n", initScript.c_str());
+    system(initScript.c_str());
+}
+
 int
 main(int argc, char* argv[])
 {
     int rv = 0;
 
-    sai_api_initialize(0, (service_method_table_t *)&test_services);
+    auto options = handleCmdLine(argc, argv);
+    handleProfileMap(options.profileMapFile);
+    handlePortMap(options.portMapFile);
+
+    sai_api_initialize(0, &test_services);
     sai_api_query(SAI_API_SWITCH, (void**)&sai_switch_api);
-#ifdef BRCMSAI
-    sai_status_t status = sai_switch_api->initialize_switch(0, "0xb850", "", &switch_notifications);
+
+    constexpr std::uint32_t attrSz = 6;
+
+    sai_attribute_t attr[attrSz];
+    std::memset(attr, '\0', sizeof(attr));
+
+    attr[0].id = SAI_SWITCH_ATTR_INIT_SWITCH;
+    attr[0].value.booldata = true;
+
+    attr[1].id = SAI_SWITCH_ATTR_SWITCH_STATE_CHANGE_NOTIFY;
+    attr[1].value.ptr = reinterpret_cast<sai_pointer_t>(&on_switch_state_change);
+
+    attr[2].id = SAI_SWITCH_ATTR_SHUTDOWN_REQUEST_NOTIFY;
+    attr[2].value.ptr = reinterpret_cast<sai_pointer_t>(&on_shutdown_request);
+
+    attr[3].id = SAI_SWITCH_ATTR_FDB_EVENT_NOTIFY;
+    attr[3].value.ptr = reinterpret_cast<sai_pointer_t>(&on_fdb_event);
+
+    attr[4].id = SAI_SWITCH_ATTR_PORT_STATE_CHANGE_NOTIFY;
+    attr[4].value.ptr = reinterpret_cast<sai_pointer_t>(&on_port_state_change);
+
+    attr[5].id = SAI_SWITCH_ATTR_PACKET_EVENT_NOTIFY;
+    attr[5].value.ptr = reinterpret_cast<sai_pointer_t>(&on_packet_event);
+
+    sai_status_t status = sai_switch_api->create_switch(&gSwitchId, attrSz, attr);
     if (status != SAI_STATUS_SUCCESS)
     {
         exit(EXIT_FAILURE);
     }
 
+    handleInitScript(options.initScript);
+
+#ifdef BRCMSAI
     std::thread bcm_diag_shell_thread = std::thread(sai_diag_shell);
     bcm_diag_shell_thread.detach();
 #endif
 
     start_sai_thrift_rpc_server(SWITCH_SAI_THRIFT_RPC_SERVER_PORT);
+
+    sai_log_set(SAI_API_SWITCH, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_BRIDGE, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_FDB, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_PORT, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_VLAN, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_ROUTE, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_VIRTUAL_ROUTER, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_ROUTER_INTERFACE, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_NEXT_HOP, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_NEXT_HOP_GROUP, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_NEIGHBOR, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_ACL, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_MIRROR, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_LAG, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_BUFFER, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_POLICER, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_WRED, SAI_LOG_LEVEL_NOTICE);
+    sai_log_set(SAI_API_QOS_MAP, SAI_LOG_LEVEL_NOTICE);
 
     while (1) pause();
 
